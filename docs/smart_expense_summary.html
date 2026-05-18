@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Smart Expense Agent — Stage Summary</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #1a1a1a; line-height: 1.45; }
+  h1 { font-size: 22pt; color: #1E3A8A; border-bottom: 2px solid #1E3A8A; padding-bottom: 4px; }
+  h2 { font-size: 16pt; color: #1E3A8A; margin-top: 22pt; }
+  h3 { font-size: 13pt; color: #0F172A; margin-top: 14pt; }
+  h4 { font-size: 11pt; color: #334155; margin-top: 10pt; }
+  table { border-collapse: collapse; width: 100%; margin: 8pt 0 12pt 0; }
+  th, td { border: 1px solid #CBD5E1; padding: 5pt 8pt; vertical-align: top; text-align: left; font-size: 10.5pt; }
+  th { background: #E0E7FF; color: #1E3A8A; font-weight: 700; }
+  tr:nth-child(even) td { background: #F8FAFC; }
+  code, pre { font-family: Consolas, 'Courier New', monospace; font-size: 10pt; background: #F1F5F9; padding: 1pt 4pt; border-radius: 3px; }
+  pre { padding: 8pt 10pt; border-left: 3px solid #1E3A8A; line-height: 1.4; }
+  ul, ol { margin-top: 4pt; margin-bottom: 8pt; }
+  li { margin-bottom: 3pt; }
+  .hebrew { direction: rtl; font-family: 'Segoe UI', Arial, sans-serif; }
+  .callout { background: #FEF3C7; border-left: 3px solid #F59E0B; padding: 8pt 12pt; margin: 10pt 0; }
+  .ok { color: #166534; font-weight: 700; }
+  .warn { color: #92400E; font-weight: 700; }
+  .danger { color: #991B1B; font-weight: 700; }
+  .small { font-size: 9.5pt; color: #64748B; }
+  hr { border: 0; border-top: 1px solid #CBD5E1; margin: 14pt 0; }
+</style>
+</head>
+<body>
+
+<h1>Smart Expense Agent — Stage Summary</h1>
+<p class="small">Working document · 2026-05-13 · Based on code review of <code>lib/</code> and architecture discussions to date.</p>
+
+<h2>1. Executive Summary</h2>
+<p>
+  <b>Smart Expense Agent</b> is a Flutter mobile app that lets Israeli company employees photograph one receipt — or a tray of up to ~20 in a single shot —
+  and have Gemini 2.5 Flash automatically extract every financial field (invoice number, date, business, final amount after discounts, VAT, parking entry/exit
+  times, line items, project mapping, and category in Hebrew). The user verifies the results on a review screen and confirms.
+</p>
+<p>
+  This document consolidates the decisions made so far across four areas: <b>backend architecture</b>, <b>data storage</b>, <b>backend language</b>,
+  and <b>unit economics / pricing</b> on the app stores.
+</p>
+
+<h2>2. Backend Architecture — Server-Authoritative, Not WhatsApp-Style</h2>
+
+<h3>Decision</h3>
+<p>
+  Data is stored <b>server-side as the source of truth</b>, with a local SQLite cache on the device for fast UI and offline queueing.
+  The "WhatsApp local-only" model was explicitly rejected because expense data is corporate financial data, not personal.
+</p>
+
+<table>
+  <thead><tr><th>Constraint</th><th>Why local-only fails</th></tr></thead>
+  <tbody>
+    <tr><td>Israeli tax retention — 7 years of receipts (תקנות מס הכנסה — ניהול פנקסים)</td><td>Lost phone or uninstall = lost audit trail.</td></tr>
+    <tr><td>Multi-user workflow (employee scans → manager approves → accountant exports)</td><td>No shared state without a server.</td></tr>
+    <tr><td>Continuity (employees leave, get new devices)</td><td>Data must outlive any single device.</td></tr>
+    <tr><td>Cross-employee dedup and project-list distribution</td><td>Requires a central source of truth.</td></tr>
+  </tbody>
+</table>
+
+<h3>High-Level Diagram</h3>
+<pre>
+Flutter app  ──┬── drift (SQLite cache + offline outbox)
+               │
+               └── HTTPS + Firebase Auth ID token
+                          │
+                          ▼
+                Backend (Cloud Run / Cloud Functions, TypeScript)
+                   │            │             │
+                   ▼            ▼             ▼
+              Firestore     Cloud Storage   Gemini API
+              (metadata)    (original         (server-side
+                            images)            only — API key
+                                               never on client)
+</pre>
+
+<h3>Why a backend exists at all (three non-negotiables)</h3>
+<ol>
+  <li><b>Hide <code>GEMINI_API_KEY</code></b> — today the key is bundled into the app via <code>.env</code> as a Flutter asset, which leaks it inside the APK/IPA. This must move server-side before any external release.</li>
+  <li><b>Enforce multi-tenant isolation</b> by <code>companyId</code> claim in Firebase Auth custom claims.</li>
+  <li><b>Be the system of record</b> for the 7-year retention requirement.</li>
+</ol>
+
+<h2>3. Storage Strategy — DB ≠ Image Store</h2>
+
+<p>
+  Metadata (the parsed <code>Receipt</code> JSON) and binary images live in <b>different services</b>. Firestore is not used for binary blobs;
+  it has a hard 1 MiB document limit and is not designed for that workload.
+</p>
+
+<table>
+  <thead><tr><th>Asset</th><th>Where it lives</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Parsed receipt JSON (invoice #, amount, items, etc.)</td><td>Firestore document</td><td>Queryable, indexed, real-time listeners.</td></tr>
+    <tr><td>Original receipt image (compressed JPEG ~150–300 KB)</td><td>Cloud Storage (Standard tier first 30 days → Coldline)</td><td>Cheap, durable, signed-URL access.</td></tr>
+    <tr><td>AI-detected crops</td><td>Cloud Storage alongside originals</td><td>Optional but useful for quick thumbnails.</td></tr>
+    <tr><td>Image hash (SHA-256)</td><td>Firestore (alongside the imageRef)</td><td>Tamper-evidence for audit; also enables cheap re-scan caching.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <b>Do originals need to be kept at all?</b> Yes — if the app is to serve as the company's system of record for tax purposes, the Israeli
+  Tax Authority's rules on "digital scanning" require retention of the scanned image for 7 years (otherwise the paper original must still
+  be kept in a folder). Storage cost is negligible (see §6), so the default recommendation is to <b>store originals</b>.
+</div>
+
+<h2>4. Database — Recommendation: Firestore</h2>
+
+<table>
+  <thead><tr><th>Option</th><th>Verdict</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><b>Firestore</b></td><td><span class="ok">Primary recommendation</span></td><td>Native integration with Firebase Auth + Cloud Storage + Gemini (all Google Cloud). Real-time listeners. Tenant isolation via security rules. Zero ops.</td></tr>
+    <tr><td>Supabase (Postgres)</td><td>Strong alternative</td><td>Real SQL, joins, Hebrew full-text search, self-hostable. Slightly more setup.</td></tr>
+    <tr><td>Self-hosted Postgres</td><td>Skip for now</td><td>Operational overhead not justified at this stage.</td></tr>
+  </tbody>
+</table>
+
+<h3>Firestore data model (top-level collections)</h3>
+<pre>
+companies/{companyId}                       ← name, defaultVatRate, settings
+companies/{companyId}/projects/{id}         ← name, address (used for project mapping)
+companies/{companyId}/users/{uid}           ← role: employee | manager | admin
+companies/{companyId}/receipts/{id}         ← parsed Receipt JSON + imageRef + imageHash
+companies/{companyId}/scans/{scanId}        ← raw Gemini response, for audit / re-run
+</pre>
+
+<h2>5. Backend Language — Recommendation: TypeScript on Cloud Run</h2>
+
+<table>
+  <thead><tr><th>Option</th><th>Verdict</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><b>TypeScript + Cloud Run</b></td><td><span class="ok">Primary recommendation</span></td><td>First-class Firebase Admin SDK and <code>@google/generative-ai</code> SDK. Largest hiring pool. Near-zero cold start, scales to zero.</td></tr>
+    <tr><td>TypeScript + Cloud Functions (Gen 2)</td><td>Fine for v1</td><td>Simpler deploy; slightly more cold-start variance.</td></tr>
+    <tr><td>Go on Cloud Run</td><td>If you prefer Go</td><td>Lower memory footprint; smaller AI SDK ecosystem.</td></tr>
+    <tr><td>Dart (shelf) on Cloud Run</td><td>Tempting, not recommended</td><td>Could share types with Flutter, but Gemini and Firebase Admin support in Dart are second-class.</td></tr>
+    <tr><td>Python</td><td>Skip for now</td><td>Adds ML flexibility you don't need yet.</td></tr>
+  </tbody>
+</table>
+
+<h3>API Surface (small on purpose)</h3>
+<pre>
+POST /v1/scan          → multipart image → Gemini → JSON      (the proxy)
+POST /v1/receipts      → bulk write after user "Confirm all"
+GET  /v1/receipts      → paginated history
+GET  /v1/projects      → projects for the user's company
+POST /v1/export/xlsx   → server-rendered Excel for accountants
+</pre>
+<p class="small">Auth: Firebase ID token in <code>Authorization: Bearer …</code>. The backend extracts <code>companyId</code> from custom claims — clients never pass it.</p>
+
+<h2>6. Cost Forecast</h2>
+
+<p>
+  <b>Baseline scenario</b>: mid-sized Israeli company — 100 employees, ~30 receipts/employee/month = <b>3,000 receipts/month</b>,
+  ~250 KB per compressed image, 7-year retention.
+</p>
+
+<h3>Steady-state monthly cost (USD, Google Cloud)</h3>
+<table>
+  <thead><tr><th>Service</th><th>Calculation</th><th>Monthly</th></tr></thead>
+  <tbody>
+    <tr><td>Cloud Storage — Standard (first 30 days)</td><td>750 MB × $0.020/GB</td><td>~$0.02</td></tr>
+    <tr><td>Cloud Storage — Coldline (cumulative over 7 yrs)</td><td>~63 GB × $0.004/GB</td><td>~$0.25</td></tr>
+    <tr><td>Firestore — writes</td><td>3,000 × $0.18/100k</td><td>~$0.01</td></tr>
+    <tr><td>Firestore — reads</td><td>~30,000 × $0.06/100k</td><td>~$0.02</td></tr>
+    <tr><td>Firestore — doc storage</td><td>~6 MB</td><td>&lt; $0.01</td></tr>
+    <tr><td>Cloud Run — compute</td><td>~1,000 invocations × 5 s × 512 MB</td><td>covered by free tier</td></tr>
+    <tr><td>Egress (mobile clients downloading images)</td><td>~10 GB × $0.12/GB</td><td>~$1.20</td></tr>
+    <tr><td>Firebase Auth</td><td>&lt; 50k MAU</td><td>free</td></tr>
+    <tr><td><b>Gemini 2.5 Flash</b></td><td>~$0.008 per scan × ~1,000 scans (batched)</td><td><b>~$8.00</b></td></tr>
+    <tr><th colspan="2">TOTAL</th><th>~$10.00 / month</th></tr>
+  </tbody>
+</table>
+<p><b>Takeaway:</b> Gemini API is roughly 80% of total cost. Everything else is rounding error.</p>
+
+<h3>Scaling table</h3>
+<table>
+  <thead><tr><th>Company size</th><th>Receipts / month</th><th>Approx. monthly cost</th></tr></thead>
+  <tbody>
+    <tr><td>Small — 20 employees</td><td>600</td><td>~$3</td></tr>
+    <tr><td>Mid — 100 employees</td><td>3,000</td><td><b>~$10</b></td></tr>
+    <tr><td>Large — 1,000 employees</td><td>30,000</td><td>~$85</td></tr>
+    <tr><td>Enterprise — 10,000 employees</td><td>300,000</td><td>~$850</td></tr>
+  </tbody>
+</table>
+
+<h3>Cost levers (when scale demands it)</h3>
+<ol>
+  <li><b>Batch better</b> — pack ~10 receipts per Gemini call. Cuts AI cost ~5×.</li>
+  <li><b>Cache Gemini responses by <code>imageHash</code></b> — re-scans of the same image cost $0.</li>
+  <li><b>Tier images to Archive</b> ($0.0012/GB) after 1 year → another 3× reduction on storage.</li>
+  <li><b>Two-pass model</b> — Flash-Lite for detection, full Flash for OCR (future optimization).</li>
+</ol>
+
+<h2>7. Unit Economics on the App Stores</h2>
+
+<h3>Per-employee variable cost</h3>
+<table>
+  <thead><tr><th>Cost line</th><th>Per employee / month</th></tr></thead>
+  <tbody>
+    <tr><td>Gemini 2.5 Flash (3 batched scans × ~$0.008)</td><td>~$0.024</td></tr>
+    <tr><td>Cloud Storage (Standard + Coldline blend over 7 yrs)</td><td>~$0.003</td></tr>
+    <tr><td>Firestore reads + writes</td><td>&lt; $0.001</td></tr>
+    <tr><td>Cloud Run compute</td><td>$0 (free tier)</td></tr>
+    <tr><td>Egress (image thumbnails)</td><td>~$0.002</td></tr>
+    <tr><th>Cloud + AI subtotal</th><th>~$0.03</th></tr>
+  </tbody>
+</table>
+
+<h3>Store commission</h3>
+<table>
+  <thead><tr><th></th><th>Apple App Store</th><th>Google Play</th></tr></thead>
+  <tbody>
+    <tr><td>One-time / annual fee</td><td>$99 / year (developer account)</td><td>$25 (lifetime)</td></tr>
+    <tr><td>Commission — first $1M/yr revenue</td><td><b>15%</b> (Small Business Program)</td><td><b>15%</b> (default tier)</td></tr>
+    <tr><td>Commission — above $1M/yr</td><td>30% year-1, 15% renewals</td><td>30%</td></tr>
+  </tbody>
+</table>
+<p class="small">Assumption: 15% blended store commission while revenue is below $1M/year.</p>
+
+<h3>Pricing to net $2 / employee / month</h3>
+<p>
+  Let <code>P</code> = monthly price charged per employee.
+  After 15% store cut: net revenue = <code>0.85 × P</code>.
+  Subtracting variable cost ($0.03) and solving for $2 net profit:
+</p>
+<pre>
+0.85 × P − $0.03 = $2
+→ P = $2.39 / employee / month
+</pre>
+
+<h3>Pricing scenarios</h3>
+<table>
+  <thead><tr><th>List price</th><th>Net after 15%</th><th>Variable cost</th><th>Profit / user / month</th><th>Profit / user / year</th></tr></thead>
+  <tbody>
+    <tr><td>$2.49</td><td>$2.12</td><td>−$0.03</td><td>$2.09 ✅ hits target</td><td>$25</td></tr>
+    <tr><td>$2.99</td><td>$2.54</td><td>−$0.03</td><td>$2.51</td><td>$30</td></tr>
+    <tr><td><b>$4.99</b></td><td>$4.24</td><td>−$0.03</td><td><b>$4.21</b> 🚀 recommended</td><td>$50</td></tr>
+    <tr><td>$7.99</td><td>$6.79</td><td>−$0.03</td><td>$6.76</td><td>$81</td></tr>
+  </tbody>
+</table>
+
+<h3>Recommendation: list at $4.99 / employee / month</h3>
+<ul>
+  <li>Competitive landscape sits at $4–$18 (Expensify, Zoho Expense, SAP Concur). $2.49 signals "toy product" to corporate buyers.</li>
+  <li>The Hebrew-receipts moat (categories, VAT, supermarket discount handling) is defensible — charge for it.</li>
+  <li>$4.99 still undercuts every major competitor in the Israeli market while netting $4.21 per seat after the store cut.</li>
+  <li>Suggested go-to-market hook: <b>first 3 seats free, then $4.99/seat</b>.</li>
+</ul>
+
+<h3>Fixed costs not in the unit model</h3>
+<table>
+  <thead><tr><th>Fixed cost</th><th>Amount</th></tr></thead>
+  <tbody>
+    <tr><td>Apple Developer Program</td><td>$99 / year</td></tr>
+    <tr><td>Google Play Console</td><td>$25 one-time</td></tr>
+    <tr><td>Domain + SSL (backend)</td><td>~$15 / year</td></tr>
+    <tr><td>Developer time</td><td>variable</td></tr>
+    <tr><td>Customer support (eventually)</td><td>1 person ≈ $40–80k / year</td></tr>
+  </tbody>
+</table>
+<p>Break-even on the $99 Apple fee at $4.21 net/user: ~24 user-months/year — two paying employees for a year covers it.</p>
+
+<h3>Heavy-user caveat</h3>
+<p>
+  A road warrior scanning 200 receipts/month costs ~$0.18 in cloud + AI; at $4.99 list this still nets $4.06.
+  Add a fair-use clause for &gt; 500 receipts/month and route those companies to an Enterprise plan.
+</p>
+
+<h2>8. Open Gaps Carried from Code Review</h2>
+<table>
+  <thead><tr><th>#</th><th>Severity</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>G-3</td><td><span class="danger">Critical</span></td><td><code>.env</code> as Flutter asset exposes <code>GEMINI_API_KEY</code> in the binary. Must move to backend proxy before public release.</td></tr>
+    <tr><td>G-2</td><td><span class="danger">High</span></td><td>"Confirm all" is a placeholder SnackBar — no persistence layer wired yet.</td></tr>
+    <tr><td>G-1</td><td><span class="danger">High</span></td><td>Project list is always sent empty to Gemini — needs a backend-served projects list per <code>companyId</code>.</td></tr>
+    <tr><td>G-4</td><td><span class="warn">Medium</span></td><td>System prompt hard-codes 17% VAT; the Israeli rate rose to 18% on 2025-01-01. Make rate configurable per receipt date.</td></tr>
+    <tr><td>G-7</td><td><span class="warn">Medium</span></td><td>Company Code is not validated against any backend — any 4+ char string is accepted today.</td></tr>
+    <tr><td>G-8</td><td>Low</td><td>No automated tests in the repo.</td></tr>
+  </tbody>
+</table>
+
+<h2>9. Recommended Next Steps</h2>
+<ol>
+  <li><b>Stand up the Cloud Run backend</b> in TypeScript with a single <code>/v1/scan</code> endpoint that proxies Gemini — fixes G-3 immediately.</li>
+  <li><b>Replace the in-app key</b> in <code>lib/services/gemini_service.dart</code> with a call to <code>/v1/scan</code>.</li>
+  <li><b>Wire Firebase Auth</b> — turn the Company Code into a real authenticated session.</li>
+  <li><b>Add Firestore persistence</b> for <code>receipts</code> and <code>projects</code>; replace the "Confirm all" placeholder.</li>
+  <li><b>Add tests</b> for <code>_deduplicate</code>, <code>Receipt.fromJson</code>, <code>BoundingBox.normalized</code>, and <code>GeminiService.optimizeForApi</code>.</li>
+  <li><b>Update VAT logic</b> to 18% (effective 2025-01-01) and make it rate-by-date configurable.</li>
+</ol>
+
+<hr>
+<p class="small">End of document. For the full PRD (current product state + roadmap), see <code>PRD.md</code> in the project root.</p>
+
+</body>
+</html>

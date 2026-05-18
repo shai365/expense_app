@@ -1,0 +1,25 @@
+# Build artifacts (rebuilt inside the image)
+node_modules
+dist
+
+# Secrets — never bake into the image; inject via Cloud Run Secret Manager
+.env
+.env.local
+*.env.local
+.env.example
+
+# Local dev / VCS noise
+.git
+.gitignore
+.vscode
+.idea
+*.log
+npm-debug.log*
+
+# Docs / meta
+README.md
+*.md
+
+# Docker meta itself
+Dockerfile
+.dockerignore

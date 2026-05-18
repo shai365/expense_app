@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm i *)",
+      "Bash(dir C:\\\\Projects\\\\expense_app *)",
+      "Bash(flutter *)",
+      "PowerShell(if \\($env:GEMINI_API_KEY\\) { \"key set, length=$\\($env:GEMINI_API_KEY.Length\\)\" } else { \"no GEMINI_API_KEY in env\" })",
+      "Bash(dart run *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(GEMINI_API_KEY=\"AIzaSyAAwnNxTIaWOM6wbvf2UgHUvCL709x2LMc\" dart run bin/test_gemini.dart)",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1/models?key=AIzaSyAAwnNxTIaWOM6wbvf2UgHUvCL709x2LMc\")",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyAAwnNxTIaWOM6wbvf2UgHUvCL709x2LMc\")",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1/models?key=AIzaSyDb2jkG5ZS51F76DiZfdWZBg3s71iYBB0s\")",
+      "Bash(GEMINI_API_KEY=\"AIzaSyDb2jkG5ZS51F76DiZfdWZBg3s71iYBB0s\" dart run bin/test_gemini.dart)",
+      "Bash(GEMINI_API_KEY=\"AIzaSyDb2jkG5ZS51F76DiZfdWZBg3s71iYBB0s\" dart run bin/test_gemini.dart bulk_test.png)",
+      "Bash(GEMINI_API_KEY=\"AIzaSyDb2jkG5ZS51F76DiZfdWZBg3s71iYBB0s\" dart run bin/test_gemini.dart test_receipts.jpg)",
+      "PowerShell(flutter analyze *)",
+      "PowerShell($word = New-Object -ComObject Word.Application -ErrorAction SilentlyContinue; if \\($word\\) { \"Word COM available - version $\\($word.Version\\)\"; $word.Quit\\(\\) } else { \"Word COM not available\" })",
+      "PowerShell($src = 'C:\\\\Projects\\\\expense_app\\\\docs\\\\smart_expense_summary.html'; $dst = 'C:\\\\Projects\\\\expense_app\\\\docs\\\\Smart_Expense_Agent_Summary.docx'; $word = New-Object -ComObject Word.Application; $word.Visible = $false; $doc = $word.Documents.Open\\($src\\); $doc.SaveAs\\([ref]$dst, [ref]16\\); $doc.Close\\(\\); $word.Quit\\(\\); [System.Runtime.Interopservices.Marshal]::ReleaseComObject\\($word\\) | Out-Null; \"Saved: $dst\"; Get-Item $dst | Select-Object Name, Length, LastWriteTime)",
+      "PowerShell(Get-Item 'C:\\\\Projects\\\\expense_app\\\\docs\\\\Smart_Expense_Agent_Summary.docx' | Select-Object Name, @{Name='Size_KB';Expression={[math]::Round\\($_.Length/1KB,1\\)}}, LastWriteTime | Format-List)",
+      "Bash(find ~/.pub-cache -path \"*image_picker*\" -name \"image_picker.dart\" 2>/dev/null | head -5)",
+      "Read(//c/Users/click/**)",
+      "PowerShell($flutter = Get-Command flutter -ErrorAction SilentlyContinue; if \\($flutter\\) { \"flutter: $\\($flutter.Source\\)\" } else { \"flutter not on PATH\" })",
+      "Bash(git init *)",
+      "Bash(git check-ignore *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
