@@ -21,6 +21,9 @@ model Organization {
   vatStatus       String?   @map("vat_status")
   country         String    @default("IL")
   defaultCurrency String    @default("ILS") @map("default_currency")
+  // Partial unique index on lower(company_code) lives in migration 002
+  // (SQL only — Prisma cannot represent the WHERE clause).
+  companyCode     String?   @map("company_code")
   settings        Json      @default("{}")
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz

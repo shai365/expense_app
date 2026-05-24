@@ -103,6 +103,7 @@ class Receipt {
     required this.confidence,
     this.boundingBox,
     this.croppedImage,
+    this.duplicate = false,
   });
 
   final String id;
@@ -119,6 +120,10 @@ class Receipt {
   final double confidence;
   final BoundingBox? boundingBox;
   Uint8List? croppedImage;
+
+  /// True when the backend recognised this receipt as already persisted
+  /// (matched on invoice_number for the same org).
+  final bool duplicate;
 
   bool get isParking => category == ReceiptCategory.parking;
 
@@ -140,10 +145,15 @@ class Receipt {
       items: items ?? this.items,
       confidence: confidence,
       boundingBox: boundingBox,
+      duplicate: duplicate,
     )..croppedImage = croppedImage;
   }
 
-  factory Receipt.fromJson(Map<String, dynamic> json, {required String id}) {
+  /// Build from JSON. The optional [fallbackId] is used when the payload
+  /// doesn't carry an 'id' field — e.g. when parsing a raw Gemini response
+  /// during the legacy direct-call path. Backend responses always include
+  /// the persisted receipt UUID.
+  factory Receipt.fromJson(Map<String, dynamic> json, {String? fallbackId}) {
     final rawItems = json['items'];
     final items = <ReceiptItem>[];
     if (rawItems is List) {
@@ -154,6 +164,11 @@ class Receipt {
           items.add(ReceiptItem.fromJson(Map<String, dynamic>.from(entry)));
         }
       }
+    }
+
+    final id = _toString(json['id']) ?? fallbackId;
+    if (id == null) {
+      throw ArgumentError('Receipt.fromJson: neither id nor fallbackId provided');
     }
 
     return Receipt(
@@ -170,6 +185,7 @@ class Receipt {
       items: items,
       confidence: _toDouble(json['confidence']) ?? 0,
       boundingBox: BoundingBox.tryFromJson(json['bounding_box']),
+      duplicate: json['duplicate'] == true,
     );
   }
 }

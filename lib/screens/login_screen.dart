@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../config/api_config.dart';
 import '../services/auth_service.dart';
+import '../services/backend_service.dart';
 import '../theme/app_theme.dart';
 import 'home_screen.dart';
 
@@ -42,19 +44,47 @@ class _LoginScreenState extends State<LoginScreen> {
 
     setState(() => _submitting = true);
     final code = _codeController.text.trim().toUpperCase();
+    final backend = BackendService(
+      baseUrl: ApiConfig.backendBaseUrl,
+      useMock: ApiConfig.useMockBackend,
+    );
 
     try {
-      await _auth.saveCompanyCode(code);
+      final deviceId = await _auth.getOrCreateDeviceId();
+      final session = await backend.exchangeSession(
+        companyCode: code,
+        deviceId: deviceId,
+      );
+      await _auth.saveSession(session);
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => HomeScreen(companyCode: code)),
+        MaterialPageRoute(
+          builder: (_) => HomeScreen(companyCode: session.companyCode),
+        ),
+      );
+    } on BackendException catch (e) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      final friendly = switch (e.errorCode) {
+        'unknown_company_code' =>
+          'That Company Code isn’t recognised. Check with your administrator.',
+        'no_owner_membership' =>
+          'No active owner is configured for this Company. Contact support.',
+        'missing_token' || 'invalid' || 'expired' =>
+          'Server rejected the request. Please try again.',
+        _ => e.message,
+      };
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(friendly)),
       );
     } catch (e) {
       if (!mounted) return;
       setState(() => _submitting = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not save Company Code: $e')),
+        SnackBar(content: Text('Could not sign in: $e')),
       );
+    } finally {
+      backend.close();
     }
   }
 

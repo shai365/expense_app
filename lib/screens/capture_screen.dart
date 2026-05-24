@@ -3,9 +3,12 @@ import 'package:image_picker/image_picker.dart';
 
 import '../config/api_config.dart';
 import '../models/receipt.dart';
-import '../services/gemini_service.dart';
+import '../services/auth_service.dart';
+import '../services/backend_service.dart';
 import '../services/image_cropper.dart';
+import '../services/receipt_dedup.dart';
 import '../theme/app_theme.dart';
+import 'login_screen.dart';
 import 'results_screen.dart';
 
 class CaptureScreen extends StatefulWidget {
@@ -26,11 +29,15 @@ class _CaptureScreenState extends State<CaptureScreen> {
 
   Future<void> _capture(ImageSource source) async {
     if (_busy) return;
-    final useMock = ApiConfig.useMockGemini;
-    if (!useMock && !ApiConfig.hasGeminiKey) {
-      _showError(
-        'Gemini API key not set. Pass --dart-define=GEMINI_API_KEY=… '
-        'when running the app.',
+    final useMock = ApiConfig.useMockBackend;
+
+    final auth = AuthService();
+    final session = await auth.getSession();
+    if (!useMock && session == null) {
+      if (!mounted) return;
+      // Session expired or missing — bounce back to login.
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
       );
       return;
     }
@@ -49,12 +56,12 @@ class _CaptureScreenState extends State<CaptureScreen> {
       _statusMessage = useMock
           ? 'Loading mock receipts…'
           : (files.length == 1
-              ? 'Asking Gemini to detect receipts…'
+              ? 'Sending receipt to the server…'
               : 'Processing 0 of ${files.length} images…');
     });
 
-    final service = GeminiService(
-      apiKey: ApiConfig.geminiApiKey,
+    final backend = BackendService(
+      baseUrl: ApiConfig.backendBaseUrl,
       useMock: useMock,
     );
 
@@ -62,10 +69,10 @@ class _CaptureScreenState extends State<CaptureScreen> {
 
     Future<List<Receipt>> processOne(XFile file) async {
       final bytes = await file.readAsBytes();
-      final receipts = await service.analyzeReceipts(
+      final receipts = await backend.scan(
         imageBytes: bytes,
         mimeType: _mimeFor(file.name),
-        companyCode: widget.companyCode,
+        session: session!,
       );
       // Crop from THIS image so each receipt's thumbnail matches its source.
       await ImageCropper.attachCrops(sourceBytes: bytes, receipts: receipts);
@@ -82,7 +89,8 @@ class _CaptureScreenState extends State<CaptureScreen> {
 
     try {
       final perImage = await Future.wait(files.map(processOne));
-      final merged = service.deduplicate(perImage.expand((r) => r).toList());
+      final merged =
+          deduplicateReceipts(perImage.expand((r) => r).toList());
 
       if (!mounted) return;
 
@@ -107,13 +115,34 @@ class _CaptureScreenState extends State<CaptureScreen> {
           builder: (_) => ResultsScreen(receipts: merged),
         ),
       );
+    } on BackendException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _statusMessage = null;
+      });
+      // Token rejected → push the user to login.
+      if (e.errorCode == 'expired' ||
+          e.errorCode == 'invalid' ||
+          e.errorCode == 'missing_token' ||
+          e.statusCode == 401) {
+        await auth.signOut();
+        if (!mounted) return;
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+        );
+        return;
+      }
+      _showError('Scan failed: ${e.message}');
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _busy = false;
         _statusMessage = null;
       });
-      _showError('Analysis failed: $e');
+      _showError('Scan failed: $e');
+    } finally {
+      backend.close();
     }
   }
 

@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI, type GenerativeModel } from '@google/generative-ai';
 
-const DEFAULT_MODEL = process.env.GEMINI_MODEL ?? 'gemini-1.5-flash';
+const DEFAULT_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 
 export interface Project {
   name: string;
