@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import type { GeminiReceipt } from './gemini.js';
@@ -45,92 +46,129 @@ function parseTimeOfDay(timeStr: string | null): Date | null {
   return Number.isNaN(ms) ? null : new Date(ms);
 }
 
-async function resolveProjectId(
-  orgId: string,
-  projectName: string | null,
-): Promise<string | null> {
-  if (!projectName) return null;
-  const project = await prisma.project.findUnique({
-    where: { orgId_name: { orgId, name: projectName } },
-    select: { id: true },
-  });
-  return project?.id ?? null;
-}
-
 export async function persistReceipts(
   input: PersistReceiptsInput,
 ): Promise<PersistedReceipt[]> {
-  const persisted: PersistedReceipt[] = [];
+  if (input.receipts.length === 0) return [];
+
   const scannedAt = new Date();
 
-  for (const receipt of input.receipts) {
-    const projectId = await resolveProjectId(input.orgId, receipt.project_name);
-    const vatRate = receipt.vat !== null ? statutoryRateFor(receipt.date) : null;
+  const projectNames = Array.from(
+    new Set(
+      input.receipts
+        .map((r) => r.project_name)
+        .filter((n): n is string => !!n),
+    ),
+  );
+  const invoiceNumbers = Array.from(
+    new Set(
+      input.receipts
+        .map((r) => r.invoice_number)
+        .filter((n): n is string => !!n),
+    ),
+  );
 
-    try {
-      const created = await prisma.$transaction(async (tx) => {
-        const row = await tx.receipt.create({
-          data: {
-            orgId: input.orgId,
-            scannedByUserId: input.userId,
-            scanJobId: input.scanJobId,
-            invoiceNumber: receipt.invoice_number,
-            receiptDate: parseReceiptDate(receipt.date),
-            businessName: receipt.business_name,
-            amount: receipt.amount,
-            vatAmount: receipt.vat,
-            vatRate,
-            vatSource: vatSourceFor(receipt),
-            startTime: parseTimeOfDay(receipt.start_time),
-            endTime: parseTimeOfDay(receipt.end_time),
-            projectId,
-            category: receipt.category,
-            boundingBox: receipt.bounding_box as Prisma.InputJsonValue,
-            confidence: receipt.confidence,
-            scannedAt,
-          },
-          select: { id: true },
-        });
-
-        if (receipt.items.length > 0) {
-          await tx.receiptItem.createMany({
-            data: receipt.items.map((item, ord) => ({
-              receiptId: row.id,
-              ord,
-              code: item.code,
-              description: item.description,
-              quantity: item.quantity,
-              price: item.price,
-            })),
-          });
-        }
-
-        return row;
-      });
-
-      persisted.push({ id: created.id, duplicate: false, data: receipt });
-    } catch (e) {
-      if (
-        e instanceof Prisma.PrismaClientKnownRequestError &&
-        e.code === 'P2002' &&
-        receipt.invoice_number
-      ) {
-        const existing = await prisma.receipt.findFirst({
+  const [projectRows, duplicateRows] = await Promise.all([
+    projectNames.length > 0
+      ? prisma.project.findMany({
+          where: { orgId: input.orgId, name: { in: projectNames } },
+          select: { id: true, name: true },
+        })
+      : Promise.resolve([] as { id: string; name: string }[]),
+    invoiceNumbers.length > 0
+      ? prisma.receipt.findMany({
           where: {
             orgId: input.orgId,
-            invoiceNumber: receipt.invoice_number,
+            invoiceNumber: { in: invoiceNumbers },
             deletedAt: null,
           },
-          select: { id: true },
-        });
-        if (existing) {
-          persisted.push({ id: existing.id, duplicate: true, data: receipt });
-          continue;
-        }
-      }
-      throw e;
-    }
+          select: { id: true, invoiceNumber: true },
+        })
+      : Promise.resolve([] as { id: string; invoiceNumber: string | null }[]),
+  ]);
+
+  const projectIdByName = new Map(projectRows.map((p) => [p.name, p.id]));
+  const existingIdByInvoice = new Map<string, string>();
+  for (const row of duplicateRows) {
+    if (row.invoiceNumber) existingIdByInvoice.set(row.invoiceNumber, row.id);
   }
 
-  return persisted;
+  const queuedIdByInvoice = new Map<string, string>();
+  const results: PersistedReceipt[] = [];
+  const receiptRows: Prisma.ReceiptCreateManyInput[] = [];
+  const itemRows: Prisma.ReceiptItemCreateManyInput[] = [];
+
+  for (const receipt of input.receipts) {
+    if (receipt.invoice_number) {
+      const existing = existingIdByInvoice.get(receipt.invoice_number);
+      if (existing) {
+        results.push({ id: existing, duplicate: true, data: receipt });
+        continue;
+      }
+      const queued = queuedIdByInvoice.get(receipt.invoice_number);
+      if (queued) {
+        results.push({ id: queued, duplicate: true, data: receipt });
+        continue;
+      }
+    }
+
+    const id = randomUUID();
+    if (receipt.invoice_number) {
+      queuedIdByInvoice.set(receipt.invoice_number, id);
+    }
+
+    const projectId = receipt.project_name
+      ? projectIdByName.get(receipt.project_name) ?? null
+      : null;
+    const vatRate = receipt.vat !== null ? statutoryRateFor(receipt.date) : null;
+
+    receiptRows.push({
+      id,
+      orgId: input.orgId,
+      scannedByUserId: input.userId,
+      scanJobId: input.scanJobId,
+      invoiceNumber: receipt.invoice_number,
+      receiptDate: parseReceiptDate(receipt.date),
+      businessName: receipt.business_name,
+      amount: receipt.amount,
+      vatAmount: receipt.vat,
+      vatRate,
+      vatSource: vatSourceFor(receipt),
+      startTime: parseTimeOfDay(receipt.start_time),
+      endTime: parseTimeOfDay(receipt.end_time),
+      projectId,
+      category: receipt.category,
+      boundingBox:
+        receipt.bounding_box === null
+          ? Prisma.JsonNull
+          : (receipt.bounding_box as Prisma.InputJsonValue),
+      confidence: receipt.confidence,
+      scannedAt,
+    });
+
+    receipt.items.forEach((item, ord) => {
+      itemRows.push({
+        receiptId: id,
+        ord,
+        code: item.code,
+        description: item.description,
+        quantity: item.quantity,
+        price: item.price,
+      });
+    });
+
+    results.push({ id, duplicate: false, data: receipt });
+  }
+
+  if (receiptRows.length > 0) {
+    const writes: Prisma.PrismaPromise<unknown>[] = [
+      prisma.receipt.createMany({ data: receiptRows }),
+    ];
+    if (itemRows.length > 0) {
+      writes.push(prisma.receiptItem.createMany({ data: itemRows }));
+    }
+    await prisma.$transaction(writes);
+  }
+
+  return results;
 }
