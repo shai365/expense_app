@@ -1,14 +1,13 @@
 import type { Request, Response, NextFunction } from 'express';
 import {
   analyzeReceipts,
+  GEMINI_MODEL,
   GeminiError,
   type GeminiReceipt,
   type Project,
 } from '../services/gemini.js';
 import { persistReceipts } from '../services/persistence.js';
 import { prisma } from '../db.js';
-
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-1.5-flash';
 
 interface ScanBody {
   image?: { data?: unknown; mime_type?: unknown };

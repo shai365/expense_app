@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI, type GenerativeModel } from '@google/generative-ai';
 
-const DEFAULT_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
+export const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 
 export interface Project {
   name: string;
@@ -123,8 +123,12 @@ function getModel(): GenerativeModel {
   }
   const genAI = new GoogleGenerativeAI(apiKey);
   modelClient = genAI.getGenerativeModel({
-    model: DEFAULT_MODEL,
-    generationConfig: { temperature: 0.2 },
+    model: GEMINI_MODEL,
+    systemInstruction: SYSTEM_PROMPT,
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: 'application/json',
+    },
   });
   return modelClient;
 }
@@ -152,7 +156,6 @@ Analyse the attached image and return the JSON array described in your instructi
   try {
     result = await model.generateContent({
       contents: [
-        { role: 'user', parts: [{ text: SYSTEM_PROMPT }] },
         {
           role: 'user',
           parts: [
@@ -183,10 +186,9 @@ Analyse the attached image and return the JSON array described in your instructi
 }
 
 function parseReceipts(raw: string): GeminiReceipt[] {
-  const cleaned = extractJson(raw);
   let decoded: unknown;
   try {
-    decoded = JSON.parse(cleaned);
+    decoded = JSON.parse(raw);
   } catch (e) {
     throw new GeminiError(
       'invalid_json',
@@ -203,27 +205,4 @@ function parseReceipts(raw: string): GeminiReceipt[] {
     return (decoded as { receipts: GeminiReceipt[] }).receipts;
   }
   throw new GeminiError('unexpected_shape', 'Unexpected response shape');
-}
-
-function extractJson(raw: string): string {
-  let t = raw.trim();
-  if (t.startsWith('```')) {
-    const nl = t.indexOf('\n');
-    if (nl !== -1) t = t.substring(nl + 1);
-    if (t.endsWith('```')) t = t.substring(0, t.length - 3);
-    t = t.trim();
-  }
-  if (
-    (t.startsWith('[') && t.endsWith(']')) ||
-    (t.startsWith('{') && t.endsWith('}'))
-  ) {
-    return t;
-  }
-  const fb = t.indexOf('[');
-  const lb = t.lastIndexOf(']');
-  if (fb !== -1 && lb > fb) return t.substring(fb, lb + 1);
-  const fbr = t.indexOf('{');
-  const lbr = t.lastIndexOf('}');
-  if (fbr !== -1 && lbr > fbr) return t.substring(fbr, lbr + 1);
-  return t;
 }
