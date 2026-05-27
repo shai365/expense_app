@@ -1,6 +1,18 @@
 import { GoogleGenerativeAI, type GenerativeModel } from '@google/generative-ai';
 
-export const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash-lite';
+// Pinned at the code level — do NOT read from env. We were silently
+// running on `gemini-2.5-flash` in production because a stale env var
+// overrode the intended default; the resulting per-call latency was ~7.8s
+// vs the expected sub-5s on flash-lite. If a future model swap is needed,
+// change the literal here so the chosen model is visible in code review.
+export const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+
+if (process.env.GEMINI_MODEL && process.env.GEMINI_MODEL !== GEMINI_MODEL) {
+  console.warn(
+    `[gemini] ignoring GEMINI_MODEL env var (=${process.env.GEMINI_MODEL}); ` +
+      `pinned to ${GEMINI_MODEL}`,
+  );
+}
 
 export interface Project {
   name: string;
