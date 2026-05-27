@@ -115,10 +115,55 @@ class BackendService {
       return deduplicateReceipts(mockReceipts());
     }
 
+    // Short per-call tag so logs stay attributable when multiple receipts
+    // are processed in the same batch.
+    final reqId = (DateTime.now().millisecondsSinceEpoch & 0xFFFF)
+        .toRadixString(16)
+        .padLeft(4, '0');
+    final tag = '[client-scan $reqId]';
+    final totalSw = Stopwatch()..start();
+    // ignore: avoid_print
+    print(
+      '$tag scan() start: input=${imageBytes.length}B '
+      '(~${(imageBytes.length / 1024).toStringAsFixed(1)}KB), mime=$mimeType',
+    );
+
+    final optimizeSw = Stopwatch()..start();
     final optimized = optimizeForApi(imageBytes, originalMime: mimeType);
+    optimizeSw.stop();
+    // ignore: avoid_print
+    print(
+      '$tag optimizeForApi: ${optimizeSw.elapsedMilliseconds}ms '
+      '(out=${optimized.finalBytes}B)',
+    );
+
+    final b64Sw = Stopwatch()..start();
     final base64Image = base64Encode(optimized.bytes);
+    b64Sw.stop();
+    // ignore: avoid_print
+    print(
+      '$tag base64Encode: ${b64Sw.elapsedMilliseconds}ms '
+      '(${base64Image.length} chars, ~${(base64Image.length / 1024).toStringAsFixed(1)}KB)',
+    );
+
+    final jsonSw = Stopwatch()..start();
+    final body = json.encode({
+      'company_code': session.companyCode,
+      'projects': projects,
+      'image': {
+        'mime_type': optimized.mimeType,
+        'data': base64Image,
+      },
+    });
+    jsonSw.stop();
+    // ignore: avoid_print
+    print(
+      '$tag json.encode body: ${jsonSw.elapsedMilliseconds}ms '
+      '(body length=${body.length} chars, ~${(body.length / 1024).toStringAsFixed(1)}KB)',
+    );
 
     final http.Response response;
+    final httpSw = Stopwatch()..start();
     try {
       response = await _client
           .post(
@@ -127,23 +172,38 @@ class BackendService {
               'content-type': 'application/json',
               'authorization': 'Bearer ${session.token}',
             },
-            body: json.encode({
-              'company_code': session.companyCode,
-              'projects': projects,
-              'image': {
-                'mime_type': optimized.mimeType,
-                'data': base64Image,
-              },
-            }),
+            body: body,
           )
           .timeout(_timeout);
     } on SocketException catch (e) {
+      httpSw.stop();
+      // ignore: avoid_print
+      print(
+        '$tag http.post FAILED after ${httpSw.elapsedMilliseconds}ms: SocketException(${e.message})',
+      );
       throw BackendException('Network error: ${e.message}');
     } on HttpException catch (e) {
+      httpSw.stop();
+      // ignore: avoid_print
+      print(
+        '$tag http.post FAILED after ${httpSw.elapsedMilliseconds}ms: HttpException(${e.message})',
+      );
       throw BackendException('HTTP error: ${e.message}');
     }
+    httpSw.stop();
+    // ignore: avoid_print
+    print(
+      '$tag http.post: ${httpSw.elapsedMilliseconds}ms '
+      '(status=${response.statusCode}, response=${response.bodyBytes.length}B)',
+    );
 
+    final parseSw = Stopwatch()..start();
     final decoded = _decodeBody(response);
+    parseSw.stop();
+    // ignore: avoid_print
+    print(
+      '$tag response decode: ${parseSw.elapsedMilliseconds}ms',
+    );
 
     if (response.statusCode != 200) {
       throw BackendException(
@@ -174,6 +234,13 @@ class BackendService {
         );
       }
     }
+
+    totalSw.stop();
+    // ignore: avoid_print
+    print(
+      '$tag scan() TOTAL: ${totalSw.elapsedMilliseconds}ms '
+      '(returned ${receipts.length} receipt(s))',
+    );
     return receipts;
   }
 

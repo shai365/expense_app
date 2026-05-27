@@ -31,7 +31,12 @@
       "Bash(gh repo *)",
       "Bash(git remote *)",
       "Bash(git push *)",
-      "Bash(npx --prefix C:/Projects/expense_app/backend prisma generate --schema C:/Projects/expense_app/backend/prisma/schema.prisma)"
+      "Bash(npx --prefix C:/Projects/expense_app/backend prisma generate --schema C:/Projects/expense_app/backend/prisma/schema.prisma)",
+      "Bash(npx prisma *)",
+      "Bash(timeout 20 node -e ' *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(git *)",
+      "Bash(node -e \"console.log\\(require\\('./package.json'\\).dependencies['@prisma/client']\\)\")"
     ]
   }
 }
