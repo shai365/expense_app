@@ -18,6 +18,7 @@ export interface PersistReceiptsInput {
   userId: string;
   scanJobId: string;
   receipts: GeminiReceipt[];
+  reqId?: string;
 }
 
 function statutoryRateFor(dateStr: string | null): number {
@@ -49,7 +50,11 @@ function parseTimeOfDay(timeStr: string | null): Date | null {
 export async function persistReceipts(
   input: PersistReceiptsInput,
 ): Promise<PersistedReceipt[]> {
-  if (input.receipts.length === 0) return [];
+  const tag = `[scan ${input.reqId ?? 'noid'}]`;
+  if (input.receipts.length === 0) {
+    console.log(`${tag} persistReceipts: 0 receipts — skipping all DB writes`);
+    return [];
+  }
 
   const scannedAt = new Date();
 
@@ -68,6 +73,12 @@ export async function persistReceipts(
     ),
   );
 
+  console.log(
+    `${tag} persistReceipts: ${input.receipts.length} receipts, ` +
+      `${projectNames.length} project names, ${invoiceNumbers.length} invoice nums to look up`,
+  );
+
+  console.time(`${tag} db.lookup (project + duplicate findMany)`);
   const [projectRows, duplicateRows] = await Promise.all([
     projectNames.length > 0
       ? prisma.project.findMany({
@@ -86,6 +97,7 @@ export async function persistReceipts(
         })
       : Promise.resolve([] as { id: string; invoiceNumber: string | null }[]),
   ]);
+  console.timeEnd(`${tag} db.lookup (project + duplicate findMany)`);
 
   const projectIdByName = new Map(projectRows.map((p) => [p.name, p.id]));
   const existingIdByInvoice = new Map<string, string>();
@@ -167,7 +179,17 @@ export async function persistReceipts(
     if (itemRows.length > 0) {
       writes.push(prisma.receiptItem.createMany({ data: itemRows }));
     }
+    console.log(
+      `${tag} db.$transaction: inserting ${receiptRows.length} receipt row(s) ` +
+        `+ ${itemRows.length} item row(s)`,
+    );
+    console.time(`${tag} db.$transaction (bulk createMany)`);
     await prisma.$transaction(writes);
+    console.timeEnd(`${tag} db.$transaction (bulk createMany)`);
+  } else {
+    console.log(
+      `${tag} db.$transaction: skipped (all ${input.receipts.length} receipts were duplicates)`,
+    );
   }
 
   return results;

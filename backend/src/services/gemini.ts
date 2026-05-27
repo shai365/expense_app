@@ -12,6 +12,7 @@ export interface ScanRequestInput {
   mimeType: string;
   companyCode: string;
   projects: Project[];
+  reqId?: string;
 }
 
 export interface GeminiReceiptItem {
@@ -136,6 +137,7 @@ function getModel(): GenerativeModel {
 export async function analyzeReceipts(
   input: ScanRequestInput,
 ): Promise<GeminiReceipt[]> {
+  const tag = `[scan ${input.reqId ?? 'noid'}]`;
   const model = getModel();
 
   const projectsBlock =
@@ -152,7 +154,14 @@ ${projectsBlock}
 Analyse the attached image and return the JSON array described in your instructions.
 `;
 
+  console.log(
+    `${tag} gemini.generateContent calling model=${GEMINI_MODEL} ` +
+      `inlineData.length=${input.imageBase64.length} chars`,
+  );
+
   let result;
+  const callStart = Date.now();
+  console.time(`${tag} gemini.generateContent network`);
   try {
     result = await model.generateContent({
       contents: [
@@ -171,18 +180,32 @@ Analyse the attached image and return the JSON array described in your instructi
       ],
     });
   } catch (err) {
+    console.timeEnd(`${tag} gemini.generateContent network`);
+    console.error(
+      `${tag} gemini.generateContent FAILED after ${Date.now() - callStart}ms:`,
+      (err as Error).message,
+    );
     throw new GeminiError(
       'upstream_error',
       `Gemini call failed: ${(err as Error).message}`,
     );
   }
+  console.timeEnd(`${tag} gemini.generateContent network`);
+  const callMs = Date.now() - callStart;
 
+  console.time(`${tag} gemini.response.text + parse`);
   const text = result.response.text();
   if (!text || text.trim() === '') {
+    console.timeEnd(`${tag} gemini.response.text + parse`);
     throw new GeminiError('empty_response', 'Empty response from model');
   }
+  console.log(
+    `${tag} gemini call=${callMs}ms, response text length=${text.length} chars`,
+  );
 
-  return parseReceipts(text);
+  const parsed = parseReceipts(text);
+  console.timeEnd(`${tag} gemini.response.text + parse`);
+  return parsed;
 }
 
 function parseReceipts(raw: string): GeminiReceipt[] {

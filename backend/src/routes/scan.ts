@@ -32,6 +32,14 @@ export async function scanHandler(
     return;
   }
 
+  const reqId = req.reqId ?? 'noid';
+  const handlerStart = Date.now();
+  const queueMs =
+    req.receivedAt !== undefined ? handlerStart - req.receivedAt : -1;
+  console.log(
+    `[scan ${reqId}] handler start (queue+auth+parse = ${queueMs}ms after receive)`,
+  );
+
   const body = (req.body ?? {}) as ScanBody;
   const data = body.image?.data;
   const mime = body.image?.mime_type;
@@ -62,7 +70,20 @@ export async function scanHandler(
       })
     : [];
 
+  // ---- payload telemetry -------------------------------------------------
+  const base64Len = data.length;
+  const decodedBytes = Math.floor((base64Len * 3) / 4); // approx, ignoring padding
+  console.log(
+    `[scan ${reqId}] payload: base64.length=${base64Len} chars (~${(base64Len / 1024).toFixed(1)}KB), ` +
+      `decoded≈${decodedBytes}B (~${(decodedBytes / 1024).toFixed(1)}KB), mime=${mime}, ` +
+      `projects=${projects.length}`,
+  );
+  // NOTE: server does NOT decode the image — base64 is forwarded to Gemini
+  // as inlineData. Server-side decode cost = 0ms by design.
+  console.log(`[scan ${reqId}] server-side image decode: 0ms (passthrough)`);
+
   let scanJobId: string;
+  console.time(`[scan ${reqId}] db.scanJob.create`);
   try {
     const scanJob = await prisma.scanJob.create({
       data: {
@@ -76,20 +97,25 @@ export async function scanHandler(
     });
     scanJobId = scanJob.id;
   } catch (err) {
+    console.timeEnd(`[scan ${reqId}] db.scanJob.create`);
     next(err);
     return;
   }
+  console.timeEnd(`[scan ${reqId}] db.scanJob.create`);
 
   const startedAt = Date.now();
   let receipts: GeminiReceipt[];
+  console.time(`[scan ${reqId}] gemini.analyzeReceipts TOTAL`);
   try {
     receipts = await analyzeReceipts({
       imageBase64: data,
       mimeType: mime,
       companyCode,
       projects,
+      reqId,
     });
   } catch (err) {
+    console.timeEnd(`[scan ${reqId}] gemini.analyzeReceipts TOTAL`);
     const errorCode =
       err instanceof GeminiError ? err.code : 'gemini_unknown_error';
     await prisma.scanJob
@@ -112,16 +138,24 @@ export async function scanHandler(
     next(err);
     return;
   }
+  console.timeEnd(`[scan ${reqId}] gemini.analyzeReceipts TOTAL`);
+  console.log(
+    `[scan ${reqId}] gemini returned ${receipts.length} receipt(s)`,
+  );
 
   try {
+    console.time(`[scan ${reqId}] persistReceipts TOTAL`);
     const persisted = await persistReceipts({
       orgId,
       userId,
       scanJobId,
       receipts,
+      reqId,
     });
+    console.timeEnd(`[scan ${reqId}] persistReceipts TOTAL`);
 
     const responseBytes = Buffer.byteLength(JSON.stringify(receipts), 'utf8');
+    console.time(`[scan ${reqId}] db.scanJob.update succeeded`);
     await prisma.scanJob.update({
       where: { id: scanJobId },
       data: {
@@ -132,6 +166,12 @@ export async function scanHandler(
         completedAt: new Date(),
       },
     });
+    console.timeEnd(`[scan ${reqId}] db.scanJob.update succeeded`);
+
+    const totalMs = Date.now() - (req.receivedAt ?? handlerStart);
+    console.log(
+      `[scan ${reqId}] <<< DONE: total=${totalMs}ms, gemini->done=${Date.now() - startedAt}ms, responseBytes=${responseBytes}`,
+    );
 
     res.status(200).json({
       scan_job_id: scanJobId,
