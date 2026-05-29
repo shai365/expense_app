@@ -19,8 +19,8 @@ class ReceiptCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final isLowConfidence = receipt.confidence < 0.85;
     final missingProject = receipt.projectName == null;
-    final showTimes = receipt.isParking &&
-        (receipt.startTime != null || receipt.endTime != null);
+    final showTimes =
+        receipt.startTime != null || receipt.endTime != null;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),

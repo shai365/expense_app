@@ -1,11 +1,13 @@
 import { GoogleGenerativeAI, type GenerativeModel } from '@google/generative-ai';
 
-// Pinned at the code level — do NOT read from env. We were silently
-// running on `gemini-2.5-flash` in production because a stale env var
-// overrode the intended default; the resulting per-call latency was ~7.8s
-// vs the expected sub-5s on flash-lite. If a future model swap is needed,
-// change the literal here so the chosen model is visible in code review.
-export const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+// Pinned at the code level — do NOT read from env. Flash-lite was tried
+// for latency but its field-attribution and reasoning quality were too
+// weak for Hebrew receipt OCR (timestamps dropped, fields swapped, and
+// rigid prompt rules couldn't compensate). Standard flash is the right
+// floor for this workload; the latency cost is acceptable. If a future
+// model swap is needed, change the literal here so the chosen model is
+// visible in code review.
+export const GEMINI_MODEL = 'gemini-2.5-flash';
 
 if (process.env.GEMINI_MODEL && process.env.GEMINI_MODEL !== GEMINI_MODEL) {
   console.warn(
@@ -70,7 +72,7 @@ Instructions:
    - business_name
    - amount (FINAL "Total to Pay" — see Totals rules below)
    - vat (Israeli מע"מ — see VAT rules below)
-   - start_time and end_time (HH:MM, ONLY for parking receipts — entry/exit times. Null for all other categories. See Parking timestamp rules below.)
+   - start_time and end_time (HH:MM): the transaction time, or service start_time and end_time if they are contextually printed on the receipt (entry/exit on a parking ticket, pickup/dropoff on a ride, etc.). Null when no times appear.
 4. Totals rules (CRITICAL for Hebrew supermarket receipts — Carrefour, City Market, Shufersal, Rami Levy, Victory, etc.):
    a. The "amount" field must be the FINAL amount the customer paid AFTER all discounts. Look for the LAST total printed on the receipt — common Hebrew labels include "סה"כ לתשלום", "לתשלום", "סך הכל לתשלום", "סהכ לתשלום", "סך לתשלום".
    b. Do NOT confuse this with "Total before discounts" — Hebrew labels like "סה"כ לפני הנחה", "סכום ביניים", "סה"כ לפני הנחות", "סך הכל לפני הנחה". These are intermediate totals; ignore them for the amount field.
@@ -80,19 +82,14 @@ Instructions:
    b. If VAT is NOT explicitly printed AND the business is one that typically includes VAT in the displayed total (retail, restaurants, gas stations, parking, transportation, hotels, most service shops), CALCULATE the VAT portion as: vat = round(amount / 1.18 * 0.18, 2). Return this calculated value.
    c. Only return null when amount is unknown OR the business is clearly VAT-exempt (e.g. private receipts, tips, donations, foreign vendors).
    d. Pre-2025 receipts (date strictly before 2025-01-01) used 17%. If you can clearly read a pre-2025 date AND VAT is implicit, use 17% for that single receipt: vat = round(amount / 1.17 * 0.17, 2). Otherwise default to 18%.
-6. Parking timestamp rules (חניונים — strict structural rule):
-   a. When extracting from a parking receipt and you detect exactly two HH:MM timestamps anywhere on the ticket, ignore any surrounding text, ambiguous column headers, or Hebrew labels (like "שעה", "תאריך", "תשלום"). Apply the rule mechanically based on the numeric times alone.
-   b. Compare the two times chronologically. The EARLIER time MUST be assigned to start_time. The LATER time MUST be assigned to end_time.
-   c. Example: if the ticket contains "14:11" and "15:52", set start_time = "14:11" and end_time = "15:52".
-   d. Do NOT leave end_time null when a second valid HH:MM time is clearly visible on the ticket.
-7. CATEGORY — classify each receipt into EXACTLY ONE of these six values (return the Hebrew string exactly):
+6. CATEGORY — classify each receipt into EXACTLY ONE of these six values (return the Hebrew string exactly):
    - "הוצאות חניה" — parking lots, parking meters, "חניון", "חניה"
    - "הוצאות רכב" — fuel/gas stations, car wash, EV charging, car repairs, tires, oil change, car insurance
    - "תחבורה ציבורית" — taxi (מונית, גט, יאנגו), bus, train (רכבת ישראל), light rail, ride sharing
    - "מזון ואירוח" — restaurants, cafes, bars, supermarkets, food delivery, hotels, catering, fast food
    - "תוכנה ותקשורת" — technology and AI service providers, SaaS, cloud, software subscriptions, hosting, domain registrars, telecom/phone/internet bills. When the business_name matches a recognizable tech or AI vendor (e.g. Google, Anthropic, Claude, OpenAI, ChatGPT, AWS, Amazon Web Services, Microsoft, Azure, Adobe, GitHub, GitLab, Cloudflare, Vercel, Netlify, JetBrains, Atlassian, Slack, Zoom, Notion, Figma, Dropbox, Apple iCloud, Bezeq, HOT, Cellcom, Partner, Pelephone), classify as "תוכנה ותקשורת" regardless of any food/parking/transport interpretation.
    - "אחר" — DEFAULT FALLBACK. Use this whenever the receipt does not clearly fit any of the five categories above.
-8. ITEMS — extract EVERY line item printed on the receipt:
+7. ITEMS — extract EVERY line item printed on the receipt:
    - DO NOT aggregate or deduplicate. If "חלב 3%" appears twice on two separate rows, return it twice as two separate item objects. Preserve printed order.
    - Each item object: { "code": string|null, "description": string|null, "quantity": number|null, "price": number|null }
      - code: product/PLU/SKU code if printed (often a 7–13 digit barcode column next to the item). Null if absent.
@@ -103,9 +100,9 @@ Instructions:
        a) a separate line item with description = the discount label and price = the negative amount (preferred when the discount applies to multiple items), OR
        b) by reducing the price of the specific item the discount applies to (when the discount is clearly tied to a single preceding line).
    - For pure non-supermarket receipts (parking, fuel, taxi) with no itemized breakdown, return an empty items array [].
-9. Map to project_name using the provided Project List by address proximity / business name. If your confidence in the project mapping is below 85%, set project_name to null.
-10. Always return a confidence value between 0.0 and 1.0 reflecting your overall extraction confidence for that receipt.
-11. If no receipts are detected, return an empty array.
+8. Map to project_name using the provided Project List by address proximity / business name. If your confidence in the project mapping is below 85%, set project_name to null.
+9. Always return a confidence value between 0.0 and 1.0 reflecting your overall extraction confidence for that receipt.
+10. If no receipts are detected, return an empty array.
 
 Output format (CRITICAL):
 Return ONLY a raw JSON array. No prose, no explanation, no markdown code fences (no \`\`\`), no leading or trailing text. The very first character of your response must be \`[\` and the very last character must be \`]\`.

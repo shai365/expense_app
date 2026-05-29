@@ -21,15 +21,33 @@ class OptimizedImage {
       originalBytes == 0 ? 0 : (1 - finalBytes / originalBytes) * 100;
 }
 
-const int _maxImageDimension = 960;
-const int _jpegQuality = 70;
+// Slow-path-only constants. ImagePicker is configured to deliver bytes that
+// already meet our wire-format requirements (2048px max, JPEG q88), so the
+// decode/resize/encode pipeline below is now a fallback for HEIC inputs or
+// unexpectedly oversized files — NOT the primary path. See needsOptimizing
+// below; the fast path skips this work entirely.
+const int _maxImageDimension = 2048;
+const int _jpegQuality = 88;
 
-/// Shrinks the image to a sane max long-side and re-encodes as JPEG so the
-/// payload over the wire to the backend stays small. Always re-encodes —
-/// even when the image is already under the dimension cap — to guarantee
-/// the wire format is JPEG at the configured quality. Throws if the bytes
-/// can't be decoded (e.g. HEIC), since silently passing the original
-/// through would bypass compression entirely.
+// Upper bound for the fast-path: any JPEG <= this stays untouched. 2048px @
+// q88 typically lands at 400–800KB; the 1.5MB headroom catches detail-heavy
+// receipts without forcing the slow path.
+const int _passThroughMaxBytes = 1500 * 1024;
+
+/// True when the bytes need to go through the decode→resize→encode pipeline.
+/// False means the bytes are already an acceptable JPEG and can be sent to
+/// the backend as-is — saving a lossy roundtrip AND an isolate spawn.
+bool needsOptimizing(Uint8List bytes, String mime) {
+  if (mime != 'image/jpeg') return true;
+  if (bytes.length > _passThroughMaxBytes) return true;
+  return false;
+}
+
+/// Decodes, resizes, and re-encodes the image as JPEG. This is the SLOW path
+/// (pure-Dart decode is ~1–2s for a 2MP image on a phone) and exists only
+/// for non-JPEG inputs (HEIC) or unexpectedly oversized files. Callers
+/// should check needsOptimizing() first and skip this when possible. Throws
+/// if the bytes can't be decoded.
 OptimizedImage optimizeForApi(
   Uint8List bytes, {
   String originalMime = 'image/jpeg',

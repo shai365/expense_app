@@ -1,15 +1,58 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../config/api_config.dart';
-import '../models/receipt.dart';
 import '../services/auth_service.dart';
 import '../services/backend_service.dart';
 import '../services/image_cropper.dart';
+import '../services/image_optimizer.dart';
 import '../services/receipt_dedup.dart';
 import '../theme/app_theme.dart';
 import 'login_screen.dart';
 import 'results_screen.dart';
+
+// Max simultaneous /v1/scan requests in flight. Render's single-vCPU
+// instance chokes on parallel base64 JSON parses of ~1MB bodies, so we
+// trickle requests through a small pool instead of firing all N at once.
+const int _maxConcurrentScans = 3;
+
+class _ScanPool {
+  _ScanPool(this.max);
+  final int max;
+  int _inFlight = 0;
+  final _waiting = <Completer<void>>[];
+
+  Future<T> run<T>(Future<T> Function() task) async {
+    if (_inFlight >= max) {
+      final c = Completer<void>();
+      _waiting.add(c);
+      await c.future;
+    }
+    _inFlight++;
+    try {
+      return await task();
+    } finally {
+      _inFlight--;
+      if (_waiting.isNotEmpty) _waiting.removeAt(0).complete();
+    }
+  }
+}
+
+class _CompressJob {
+  const _CompressJob(this.bytes, this.mime);
+  final Uint8List bytes;
+  final String mime;
+}
+
+// Top-level (free) function — must live outside any class so `compute`
+// can ship it to the worker isolate without dragging in an enclosing
+// `this`.
+Uint8List _compressJpegInIsolate(_CompressJob job) {
+  return optimizeForApi(job.bytes, originalMime: job.mime).bytes;
+}
 
 class CaptureScreen extends StatefulWidget {
   const CaptureScreen({super.key, required this.companyCode});
@@ -65,30 +108,84 @@ class _CaptureScreenState extends State<CaptureScreen> {
       useMock: useMock,
     );
 
-    var completed = 0;
-
-    Future<List<Receipt>> processOne(XFile file) async {
-      final bytes = await file.readAsBytes();
-      final receipts = await backend.scan(
-        imageBytes: bytes,
-        mimeType: _mimeFor(file.name),
-        session: session!,
-      );
-      // Crop from THIS image so each receipt's thumbnail matches its source.
-      await ImageCropper.attachCrops(sourceBytes: bytes, receipts: receipts);
-
-      completed++;
+    try {
+      // ----- Phase 1: read + compress all images in parallel on worker
+      // isolates. File reads are cheap async I/O; compression (decode →
+      // resize → re-encode JPEG) is CPU-heavy and used to run on the UI
+      // isolate, which stalled the main thread for ~N × 300ms when the
+      // gallery picked N images. Isolate.run lets the OS schedule the
+      // work across cores.
       if (mounted && files.length > 1) {
         setState(() {
-          _statusMessage =
-              'Processing $completed of ${files.length} images…';
+          _statusMessage = 'Compressing ${files.length} images…';
         });
       }
-      return receipts;
-    }
+      final phase1Sw = Stopwatch()..start();
+      final prepared = await Future.wait(files.map((file) async {
+        final original = await file.readAsBytes();
+        final mime = _mimeFor(file.name);
+        // Fast path: ImagePicker already delivered an acceptable JPEG, so
+        // we ship the same bytes unchanged — no isolate spawn, no second
+        // lossy roundtrip, no text-edge smear. The slow path (compute +
+        // pure-Dart decode/resize/encode) only runs for HEIC inputs or
+        // oversized files. compute() uses a top-level function (NOT an
+        // inline closure) so `this` can't leak into the worker isolate.
+        final Uint8List jpeg;
+        if (needsOptimizing(original, mime)) {
+          jpeg = await compute(
+            _compressJpegInIsolate,
+            _CompressJob(original, mime),
+          );
+        } else {
+          jpeg = original;
+        }
+        return _PreparedImage(original: original, jpeg: jpeg);
+      }));
+      phase1Sw.stop();
+      // ignore: avoid_print
+      print(
+        '[capture] phase1 read+compress ${files.length} images: '
+        '${phase1Sw.elapsedMilliseconds}ms',
+      );
 
-    try {
-      final perImage = await Future.wait(files.map(processOne));
+      // ----- Phase 2: send to backend with bounded concurrency. Crops
+      // happen per-result and already run on a worker isolate via
+      // ImageCropper.attachCrops (compute()), so they don't block UI.
+      final pool = _ScanPool(_maxConcurrentScans);
+      var completed = 0;
+      if (mounted && files.length > 1) {
+        setState(() {
+          _statusMessage = 'Processing 0 of ${files.length} images…';
+        });
+      }
+      final phase2Sw = Stopwatch()..start();
+      final perImage = await Future.wait(
+        List.generate(files.length, (i) async {
+          final p = prepared[i];
+          final receipts = await pool.run(
+            () => backend.scan(jpegBytes: p.jpeg, session: session!),
+          );
+          await ImageCropper.attachCrops(
+            sourceBytes: p.original,
+            receipts: receipts,
+          );
+          completed++;
+          if (mounted && files.length > 1) {
+            setState(() {
+              _statusMessage =
+                  'Processing $completed of ${files.length} images…';
+            });
+          }
+          return receipts;
+        }),
+      );
+      phase2Sw.stop();
+      // ignore: avoid_print
+      print(
+        '[capture] phase2 scan+crop ${files.length} images '
+        '(pool=$_maxConcurrentScans): ${phase2Sw.elapsedMilliseconds}ms',
+      );
+
       final merged =
           deduplicateReceipts(perImage.expand((r) => r).toList());
 
@@ -147,10 +244,16 @@ class _CaptureScreenState extends State<CaptureScreen> {
   }
 
   Future<List<XFile>> _pickFiles(ImageSource source) async {
+    // Picker config delivers final wire dimensions directly using the
+    // platform's hardware-accelerated resize (CoreGraphics/BitmapFactory).
+    // Bounding BOTH dimensions at 2048 means portrait shots also land
+    // ≤2048 on their long side, so the optimizer's fast path can pass
+    // bytes straight through without a second decode/resize/encode.
     if (source == ImageSource.camera) {
       final picked = await _picker.pickImage(
         source: ImageSource.camera,
         maxWidth: 2048,
+        maxHeight: 2048,
         imageQuality: 88,
       );
       return picked == null ? const [] : [picked];
@@ -158,6 +261,8 @@ class _CaptureScreenState extends State<CaptureScreen> {
 
     // Gallery: allow multi-select, hard-capped at _maxGalleryImages.
     final picked = await _picker.pickMultiImage(
+      maxWidth: 2048,
+      maxHeight: 2048,
       imageQuality: 88,
       limit: _maxGalleryImages,
     );
@@ -263,6 +368,12 @@ class _CaptureScreenState extends State<CaptureScreen> {
       ),
     );
   }
+}
+
+class _PreparedImage {
+  const _PreparedImage({required this.original, required this.jpeg});
+  final Uint8List original;
+  final Uint8List jpeg;
 }
 
 class _ActionTile extends StatelessWidget {

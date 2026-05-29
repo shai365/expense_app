@@ -6,7 +6,6 @@ import 'package:http/http.dart' as http;
 
 import '../models/receipt.dart';
 import '../models/session.dart';
-import 'image_optimizer.dart';
 import 'mock_receipts.dart';
 import 'receipt_dedup.dart';
 
@@ -103,10 +102,14 @@ class BackendService {
 
   // ------------------------------------------------------------------
   // POST /v1/scan
+  //
+  // Expects `jpegBytes` to already be the resized + re-encoded JPEG the
+  // wire format requires. The caller (see capture_screen) runs that
+  // compression off the UI isolate so a batch of N images doesn't block
+  // the main thread.
   // ------------------------------------------------------------------
   Future<List<Receipt>> scan({
-    required Uint8List imageBytes,
-    required String mimeType,
+    required Uint8List jpegBytes,
     required Session session,
     List<Map<String, String>> projects = const [],
   }) async {
@@ -124,21 +127,12 @@ class BackendService {
     final totalSw = Stopwatch()..start();
     // ignore: avoid_print
     print(
-      '$tag scan() start: input=${imageBytes.length}B '
-      '(~${(imageBytes.length / 1024).toStringAsFixed(1)}KB), mime=$mimeType',
-    );
-
-    final optimizeSw = Stopwatch()..start();
-    final optimized = optimizeForApi(imageBytes, originalMime: mimeType);
-    optimizeSw.stop();
-    // ignore: avoid_print
-    print(
-      '$tag optimizeForApi: ${optimizeSw.elapsedMilliseconds}ms '
-      '(out=${optimized.finalBytes}B)',
+      '$tag scan() start: jpeg=${jpegBytes.length}B '
+      '(~${(jpegBytes.length / 1024).toStringAsFixed(1)}KB)',
     );
 
     final b64Sw = Stopwatch()..start();
-    final base64Image = base64Encode(optimized.bytes);
+    final base64Image = base64Encode(jpegBytes);
     b64Sw.stop();
     // ignore: avoid_print
     print(
@@ -151,7 +145,7 @@ class BackendService {
       'company_code': session.companyCode,
       'projects': projects,
       'image': {
-        'mime_type': optimized.mimeType,
+        'mime_type': 'image/jpeg',
         'data': base64Image,
       },
     });
