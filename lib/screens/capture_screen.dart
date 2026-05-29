@@ -247,8 +247,8 @@ class _CaptureScreenState extends State<CaptureScreen> {
   Future<List<XFile>> _pickFiles(ImageSource source) async {
     // Picker config delivers final wire dimensions directly using the
     // platform's hardware-accelerated resize (CoreGraphics/BitmapFactory).
-    // Bounding BOTH dimensions at 2048 means portrait shots also land
-    // ≤2048 on their long side, so the optimizer's fast path can pass
+    // Bounding BOTH dimensions at 1200 means portrait shots also land
+    // ≤1200 on their long side, so the optimizer's fast path can pass
     // bytes straight through without a second decode/resize/encode.
     if (source == ImageSource.camera) {
       final picked = await _picker.pickImage(

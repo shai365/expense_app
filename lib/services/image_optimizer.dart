@@ -31,9 +31,10 @@ class OptimizedImage {
 const int _maxImageDimension = 1200;
 const int _jpegQuality = 88;
 
-// Upper bound for the fast-path: any JPEG <= this stays untouched. 2048px @
-// q88 typically lands at 400–800KB; the 1.5MB headroom catches detail-heavy
-// receipts without forcing the slow path.
+// Upper bound for the fast-path: any JPEG <= this stays untouched. At the
+// 1200px cap / q88, ImagePicker output typically lands at ~150–300KB; the
+// 450KB ceiling still lets detail-heavy receipts through while forcing
+// anything oversized down the slow path.
 const int _passThroughMaxBytes = 450 * 1024;
 
 /// True when the bytes need to go through the decode→resize→encode pipeline.

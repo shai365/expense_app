@@ -102,7 +102,6 @@ Instructions:
    - For pure non-supermarket receipts (parking, fuel, taxi) with no itemized breakdown, return an empty items array [].
 8. Map to project_name using the provided Project List by address proximity / business name. If your confidence in the project mapping is below 85%, set project_name to null.
 9. Always return a confidence value between 0.0 and 1.0 reflecting your overall extraction confidence for that receipt.
-10. If no receipts are detected, return an empty array.
 
 Output format (CRITICAL):
 Return ONLY a raw JSON array. No prose, no explanation, no markdown code fences (no \`\`\`), no leading or trailing text. The very first character of your response must be \`[\` and the very last character must be \`]\`.
@@ -216,10 +215,6 @@ Analyse the attached image and return the JSON array described in your instructi
   console.log(
     `${tag} gemini call=${callMs}ms, response text length=${text.length} chars`,
   );
-  // DIAGNOSTIC: log the unparsed model output so we can see exactly what
-  // Gemini produced for receipts where field assignments look wrong
-  // (e.g. VAT bleeding into invoice_number). Remove once stable.
-  console.log(`${tag} gemini RAW response:\n${text}`);
 
   const parsed = parseReceipts(text);
   console.timeEnd(`${tag} gemini.response.text + parse`);
