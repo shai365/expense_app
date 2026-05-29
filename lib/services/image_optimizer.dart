@@ -22,17 +22,19 @@ class OptimizedImage {
 }
 
 // Slow-path-only constants. ImagePicker is configured to deliver bytes that
-// already meet our wire-format requirements (2048px max, JPEG q88), so the
+// already meet our wire-format requirements (1200px max, JPEG q88), so the
 // decode/resize/encode pipeline below is now a fallback for HEIC inputs or
 // unexpectedly oversized files — NOT the primary path. See needsOptimizing
-// below; the fast path skips this work entirely.
-const int _maxImageDimension = 2048;
+// below; the fast path skips this work entirely. 1200px keeps Hebrew text
+// readable for OCR while shrinking the wire payload enough to fit a sub-7s
+// single-scan demo target.
+const int _maxImageDimension = 1200;
 const int _jpegQuality = 88;
 
 // Upper bound for the fast-path: any JPEG <= this stays untouched. 2048px @
 // q88 typically lands at 400–800KB; the 1.5MB headroom catches detail-heavy
 // receipts without forcing the slow path.
-const int _passThroughMaxBytes = 1500 * 1024;
+const int _passThroughMaxBytes = 450 * 1024;
 
 /// True when the bytes need to go through the decode→resize→encode pipeline.
 /// False means the bytes are already an acceptable JPEG and can be sent to

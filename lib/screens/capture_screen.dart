@@ -14,10 +14,11 @@ import '../theme/app_theme.dart';
 import 'login_screen.dart';
 import 'results_screen.dart';
 
-// Max simultaneous /v1/scan requests in flight. Render's single-vCPU
-// instance chokes on parallel base64 JSON parses of ~1MB bodies, so we
-// trickle requests through a small pool instead of firing all N at once.
-const int _maxConcurrentScans = 3;
+// Max simultaneous /v1/scan requests in flight. Bumped from 3→5 alongside
+// the 2048→1200 image cap: smaller payloads (~150–300KB at 1200px/q88) mean
+// less per-request CPU pressure on Render's single vCPU, so we can run more
+// requests in parallel without choking the JSON parse step.
+const int _maxConcurrentScans = 5;
 
 class _ScanPool {
   _ScanPool(this.max);
@@ -252,8 +253,8 @@ class _CaptureScreenState extends State<CaptureScreen> {
     if (source == ImageSource.camera) {
       final picked = await _picker.pickImage(
         source: ImageSource.camera,
-        maxWidth: 2048,
-        maxHeight: 2048,
+        maxWidth: 1200,
+        maxHeight: 1200,
         imageQuality: 88,
       );
       return picked == null ? const [] : [picked];
@@ -261,8 +262,8 @@ class _CaptureScreenState extends State<CaptureScreen> {
 
     // Gallery: allow multi-select, hard-capped at _maxGalleryImages.
     final picked = await _picker.pickMultiImage(
-      maxWidth: 2048,
-      maxHeight: 2048,
+      maxWidth: 1200,
+      maxHeight: 1200,
       imageQuality: 88,
       limit: _maxGalleryImages,
     );
