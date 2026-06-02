@@ -1,4 +1,8 @@
-import { GoogleGenerativeAI, type GenerativeModel } from '@google/generative-ai';
+import {
+  VertexAI,
+  type GenerativeModel,
+  type GenerateContentResponse,
+} from '@google-cloud/vertexai';
 
 // Pinned at the code level — do NOT read from env. Flash-lite was tried
 // for latency but its field-attribution and reasoning quality were too
@@ -129,14 +133,49 @@ If no receipts are found, return exactly: []
 
 let modelClient: GenerativeModel | null = null;
 
+/**
+ * Parse the service-account JSON we hand to Vertex AI. The whole key is
+ * stored in a single env var (GCP_PRIVATE_KEY_JSON) so Render/Cloud Run can
+ * inject it as one secret. The embedded `private_key` keeps its `\n`
+ * escapes intact through JSON.parse, so no manual newline fix-up is needed.
+ */
+function loadCredentials(): { client_email: string; private_key: string } {
+  const raw = process.env.GCP_PRIVATE_KEY_JSON;
+  if (!raw) {
+    throw new GeminiError(
+      'config_missing',
+      'GCP_PRIVATE_KEY_JSON is not configured',
+    );
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new GeminiError(
+      'config_invalid',
+      `GCP_PRIVATE_KEY_JSON is not valid JSON: ${(e as Error).message}`,
+    );
+  }
+}
+
 function getModel(): GenerativeModel {
   if (modelClient) return modelClient;
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new GeminiError('config_missing', 'GEMINI_API_KEY is not configured');
+
+  const project = process.env.GCP_PROJECT_ID;
+  if (!project) {
+    throw new GeminiError('config_missing', 'GCP_PROJECT_ID is not configured');
   }
-  const genAI = new GoogleGenerativeAI(apiKey);
-  modelClient = genAI.getGenerativeModel({
+  const location = process.env.GCP_LOCATION;
+  if (!location) {
+    throw new GeminiError('config_missing', 'GCP_LOCATION is not configured');
+  }
+  const credentials = loadCredentials();
+
+  const vertexAI = new VertexAI({
+    project,
+    location,
+    googleAuthOptions: { credentials },
+  });
+  modelClient = vertexAI.getGenerativeModel({
     model: GEMINI_MODEL,
     systemInstruction: SYSTEM_PROMPT,
     generationConfig: {
@@ -207,7 +246,7 @@ Analyse the attached image and return the JSON array described in your instructi
   const callMs = Date.now() - callStart;
 
   console.time(`${tag} gemini.response.text + parse`);
-  const text = result.response.text();
+  const text = extractText(result.response);
   if (!text || text.trim() === '') {
     console.timeEnd(`${tag} gemini.response.text + parse`);
     throw new GeminiError('empty_response', 'Empty response from model');
@@ -219,6 +258,17 @@ Analyse the attached image and return the JSON array described in your instructi
   const parsed = parseReceipts(text);
   console.timeEnd(`${tag} gemini.response.text + parse`);
   return parsed;
+}
+
+/**
+ * The Vertex SDK has no `.text()` convenience method (unlike the old
+ * @google/generative-ai client), so concatenate the text parts of the first
+ * candidate ourselves. responseMimeType=application/json means the model
+ * emits the raw JSON array as plain text parts.
+ */
+function extractText(response: GenerateContentResponse): string {
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  return parts.map((p) => p.text ?? '').join('');
 }
 
 function parseReceipts(raw: string): GeminiReceipt[] {
