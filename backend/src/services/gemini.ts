@@ -1,8 +1,4 @@
-import {
-  VertexAI,
-  type GenerativeModel,
-  type GenerateContentResponse,
-} from '@google-cloud/vertexai';
+import { GoogleGenAI, Type, type Schema } from '@google/genai';
 
 // Pinned at the code level — do NOT read from env. Flash-lite was tried
 // for latency but its field-attribution and reasoning quality were too
@@ -131,7 +127,97 @@ Each element of the array must be an object with this exact shape:
 If no receipts are found, return exactly: []
 `;
 
-let modelClient: GenerativeModel | null = null;
+let aiClient: GoogleGenAI | null = null;
+
+/**
+ * Strict JSON contract handed to Vertex as `responseSchema`. This is the
+ * formal, machine-enforced form of the output shape that SYSTEM_PROMPT
+ * already describes in prose — the prompt still owns every extraction rule,
+ * Hebrew label, VAT/category logic, etc.; this only lets the model use
+ * constrained decoding so the response can never drift from the contract.
+ * Field names, nullability, and the six-value category enum mirror
+ * GeminiReceipt / GeminiReceiptItem exactly — keep all three in sync.
+ */
+const RESPONSE_SCHEMA: Schema = {
+  type: Type.ARRAY,
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      bounding_box: {
+        type: Type.ARRAY,
+        nullable: true,
+        items: { type: Type.NUMBER },
+        minItems: '4',
+        maxItems: '4',
+      },
+      invoice_number: { type: Type.STRING, nullable: true },
+      date: { type: Type.STRING, nullable: true },
+      business_name: { type: Type.STRING, nullable: true },
+      amount: { type: Type.NUMBER, nullable: true },
+      vat: { type: Type.NUMBER, nullable: true },
+      start_time: { type: Type.STRING, nullable: true },
+      end_time: { type: Type.STRING, nullable: true },
+      project_name: { type: Type.STRING, nullable: true },
+      category: {
+        type: Type.STRING,
+        format: 'enum',
+        enum: [
+          'הוצאות חניה',
+          'הוצאות רכב',
+          'תחבורה ציבורית',
+          'מזון ואירוח',
+          'תוכנה ותקשורת',
+          'אחר',
+        ],
+      },
+      items: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            code: { type: Type.STRING, nullable: true },
+            description: { type: Type.STRING, nullable: true },
+            quantity: { type: Type.NUMBER, nullable: true },
+            price: { type: Type.NUMBER, nullable: true },
+          },
+          required: ['code', 'description', 'quantity', 'price'],
+          propertyOrdering: ['code', 'description', 'quantity', 'price'],
+        },
+      },
+      confidence: { type: Type.NUMBER },
+    },
+    required: [
+      'bounding_box',
+      'invoice_number',
+      'date',
+      'business_name',
+      'amount',
+      'vat',
+      'start_time',
+      'end_time',
+      'project_name',
+      'category',
+      'items',
+      'confidence',
+    ],
+    // invoice_number first mirrors the prompt's "PRIMARY KEY" emphasis so the
+    // model commits to it before the rest of the object.
+    propertyOrdering: [
+      'invoice_number',
+      'date',
+      'business_name',
+      'amount',
+      'vat',
+      'start_time',
+      'end_time',
+      'project_name',
+      'category',
+      'bounding_box',
+      'items',
+      'confidence',
+    ],
+  },
+};
 
 /**
  * Parse the service-account JSON we hand to Vertex AI. The whole key is
@@ -157,8 +243,8 @@ function loadCredentials(): { client_email: string; private_key: string } {
   }
 }
 
-function getModel(): GenerativeModel {
-  if (modelClient) return modelClient;
+function getClient(): GoogleGenAI {
+  if (aiClient) return aiClient;
 
   const project = process.env.GCP_PROJECT_ID;
   if (!project) {
@@ -170,27 +256,20 @@ function getModel(): GenerativeModel {
   }
   const credentials = loadCredentials();
 
-  const vertexAI = new VertexAI({
+  aiClient = new GoogleGenAI({
+    vertexai: true,
     project,
     location,
     googleAuthOptions: { credentials },
   });
-  modelClient = vertexAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    systemInstruction: SYSTEM_PROMPT,
-    generationConfig: {
-      temperature: 0.2,
-      responseMimeType: 'application/json',
-    },
-  });
-  return modelClient;
+  return aiClient;
 }
 
 export async function analyzeReceipts(
   input: ScanRequestInput,
 ): Promise<GeminiReceipt[]> {
   const tag = `[scan ${input.reqId ?? 'noid'}]`;
-  const model = getModel();
+  const ai = getClient();
 
   const projectsBlock =
     input.projects.length === 0
@@ -215,7 +294,8 @@ Analyse the attached image and return the JSON array described in your instructi
   const callStart = Date.now();
   console.time(`${tag} gemini.generateContent network`);
   try {
-    result = await model.generateContent({
+    result = await ai.models.generateContent({
+      model: GEMINI_MODEL,
       contents: [
         {
           role: 'user',
@@ -230,6 +310,18 @@ Analyse the attached image and return the JSON array described in your instructi
           ],
         },
       ],
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        temperature: 0.2,
+        responseMimeType: 'application/json',
+        responseSchema: RESPONSE_SCHEMA,
+        // Receipt OCR is structured transcription, not multi-step reasoning.
+        // gemini-2.5-flash defaults to a dynamic "thinking" budget that
+        // ballooned latency to 40s+ on line-item receipts — the hidden
+        // reasoning tokens, not the JSON output, were the cost. 0 disables
+        // thinking on 2.5-flash and is the core latency fix here.
+        thinkingConfig: { thinkingBudget: 0 },
+      },
     });
   } catch (err) {
     console.timeEnd(`${tag} gemini.generateContent network`);
@@ -245,8 +337,20 @@ Analyse the attached image and return the JSON array described in your instructi
   console.timeEnd(`${tag} gemini.generateContent network`);
   const callMs = Date.now() - callStart;
 
+  // Confirms the thinkingBudget=0 optimization at runtime: `thoughts` should
+  // read 0. If it climbs, the latency regression is back and visible here.
+  const usage = result.usageMetadata;
+  if (usage) {
+    console.log(
+      `${tag} gemini tokens: prompt=${usage.promptTokenCount ?? '?'} ` +
+        `candidates=${usage.candidatesTokenCount ?? '?'} ` +
+        `thoughts=${usage.thoughtsTokenCount ?? 0} ` +
+        `total=${usage.totalTokenCount ?? '?'}`,
+    );
+  }
+
   console.time(`${tag} gemini.response.text + parse`);
-  const text = extractText(result.response);
+  const text = result.text ?? '';
   if (!text || text.trim() === '') {
     console.timeEnd(`${tag} gemini.response.text + parse`);
     throw new GeminiError('empty_response', 'Empty response from model');
@@ -258,17 +362,6 @@ Analyse the attached image and return the JSON array described in your instructi
   const parsed = parseReceipts(text);
   console.timeEnd(`${tag} gemini.response.text + parse`);
   return parsed;
-}
-
-/**
- * The Vertex SDK has no `.text()` convenience method (unlike the old
- * @google/generative-ai client), so concatenate the text parts of the first
- * candidate ourselves. responseMimeType=application/json means the model
- * emits the raw JSON array as plain text parts.
- */
-function extractText(response: GenerateContentResponse): string {
-  const parts = response.candidates?.[0]?.content?.parts ?? [];
-  return parts.map((p) => p.text ?? '').join('');
 }
 
 function parseReceipts(raw: string): GeminiReceipt[] {
