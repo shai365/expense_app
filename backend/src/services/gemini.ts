@@ -186,6 +186,10 @@ const RESPONSE_SCHEMA: Schema = {
       },
       confidence: { type: Type.NUMBER },
     },
+    // start_time/end_time are intentionally NOT required: most receipts have
+    // no printed time, and forcing them under constrained decoding pushed the
+    // model toward inventing values. They remain optional nullable properties
+    // (and stay in propertyOrdering), so the model emits them only when real.
     required: [
       'bounding_box',
       'invoice_number',
@@ -193,8 +197,6 @@ const RESPONSE_SCHEMA: Schema = {
       'business_name',
       'amount',
       'vat',
-      'start_time',
-      'end_time',
       'project_name',
       'category',
       'items',
@@ -315,12 +317,13 @@ Analyse the attached image and return the JSON array described in your instructi
         temperature: 0.2,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
-        // Receipt OCR is structured transcription, not multi-step reasoning.
-        // gemini-2.5-flash defaults to a dynamic "thinking" budget that
-        // ballooned latency to 40s+ on line-item receipts — the hidden
-        // reasoning tokens, not the JSON output, were the cost. 0 disables
-        // thinking on 2.5-flash and is the core latency fix here.
-        thinkingConfig: { thinkingBudget: 0 },
+        // Receipt OCR is mostly transcription, so we cap thinking hard: a
+        // fully dynamic budget ballooned latency to 40s+ on line-item
+        // receipts. A small fixed 1024-token window gives the model just
+        // enough reasoning for trickier cases (e.g. parking entry/exit times,
+        // discount math) without the runaway hidden-reasoning cost. Watch the
+        // `thoughts` token telemetry below if latency creeps back up.
+        thinkingConfig: { thinkingBudget: 1024 },
       },
     });
   } catch (err) {
