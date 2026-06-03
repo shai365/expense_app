@@ -1,4 +1,11 @@
-import { GoogleGenAI, Type, type Schema } from '@google/genai';
+import {
+  GoogleGenAI,
+  Type,
+  ApiError,
+  type Schema,
+  type GenerateContentParameters,
+  type GenerateContentResponse,
+} from '@google/genai';
 
 // Pinned at the code level — do NOT read from env. Flash-lite was tried
 // for latency but its field-attribution and reasoning quality were too
@@ -267,6 +274,41 @@ function getClient(): GoogleGenAI {
   return aiClient;
 }
 
+const RATE_LIMIT_RETRY_DELAY_MS = 1500;
+
+/** True for HTTP 429 / RESOURCE_EXHAUSTED rate-limit errors from Vertex. */
+function isRateLimitError(err: unknown): boolean {
+  if (err instanceof ApiError && err.status === 429) return true;
+  const msg = err instanceof Error ? err.message : '';
+  return msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED');
+}
+
+/**
+ * Calls generateContent and, on a single 429/rate-limit, waits then retries
+ * exactly once. This keeps a transient burst-limit hit (a demo showstopper)
+ * from ever surfacing to the client. Any other error — or a second 429 —
+ * propagates to the caller, which maps it to an upstream_error.
+ */
+async function generateWithRetry(
+  ai: GoogleGenAI,
+  request: GenerateContentParameters,
+  tag: string,
+): Promise<GenerateContentResponse> {
+  try {
+    return await ai.models.generateContent(request);
+  } catch (err) {
+    if (!isRateLimitError(err)) throw err;
+    console.warn(
+      `${tag} gemini rate-limited (429) — retrying once in ` +
+        `${RATE_LIMIT_RETRY_DELAY_MS}ms`,
+    );
+    await new Promise((resolve) =>
+      setTimeout(resolve, RATE_LIMIT_RETRY_DELAY_MS),
+    );
+    return await ai.models.generateContent(request);
+  }
+}
+
 export async function analyzeReceipts(
   input: ScanRequestInput,
 ): Promise<GeminiReceipt[]> {
@@ -292,40 +334,42 @@ Analyse the attached image and return the JSON array described in your instructi
       `inlineData.length=${input.imageBase64.length} chars`,
   );
 
+  // Built once so the 429 retry path replays the exact same payload.
+  const request: GenerateContentParameters = {
+    model: GEMINI_MODEL,
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { text: userText },
+          {
+            inlineData: {
+              mimeType: input.mimeType,
+              data: input.imageBase64,
+            },
+          },
+        ],
+      },
+    ],
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+      temperature: 0.2,
+      responseMimeType: 'application/json',
+      responseSchema: RESPONSE_SCHEMA,
+      // Receipt OCR is mostly transcription, so we cap thinking hard. 400
+      // tokens keeps a healthy reasoning window for trickier cases (parking
+      // entry/exit times, discount math) while trimming our per-request token
+      // footprint to stay well under Google's TPM limit — a 429 mid-demo is a
+      // showstopper. Watch the `thoughts` telemetry below.
+      thinkingConfig: { thinkingBudget: 400 },
+    },
+  };
+
   let result;
   const callStart = Date.now();
   console.time(`${tag} gemini.generateContent network`);
   try {
-    result = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: userText },
-            {
-              inlineData: {
-                mimeType: input.mimeType,
-                data: input.imageBase64,
-              },
-            },
-          ],
-        },
-      ],
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.2,
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-        // Receipt OCR is mostly transcription, so we cap thinking hard: a
-        // fully dynamic budget ballooned latency to 40s+ on line-item
-        // receipts. A small fixed 1024-token window gives the model just
-        // enough reasoning for trickier cases (e.g. parking entry/exit times,
-        // discount math) without the runaway hidden-reasoning cost. Watch the
-        // `thoughts` token telemetry below if latency creeps back up.
-        thinkingConfig: { thinkingBudget: 1024 },
-      },
-    });
+    result = await generateWithRetry(ai, request, tag);
   } catch (err) {
     console.timeEnd(`${tag} gemini.generateContent network`);
     console.error(
