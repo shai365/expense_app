@@ -3,6 +3,14 @@ import 'package:flutter/material.dart';
 import '../models/receipt.dart';
 import '../theme/app_theme.dart';
 
+/// Returns the trimmed string, or null when it's null or blank. Keeps empty
+/// model values (e.g. "") from rendering as a stray, half-filled time row.
+String? _nonEmpty(String? s) {
+  if (s == null) return null;
+  final t = s.trim();
+  return t.isEmpty ? null : t;
+}
+
 class ReceiptCard extends StatelessWidget {
   const ReceiptCard({
     super.key,
@@ -19,8 +27,22 @@ class ReceiptCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final isLowConfidence = receipt.confidence < 0.85;
     final missingProject = receipt.projectName == null;
-    final showTimes =
-        receipt.startTime != null || receipt.endTime != null;
+    // Defensive time display: ignore null/blank values and show only what's
+    // actually present — a full range when both ends exist, a single clean
+    // time (no trailing arrow or dash) when only one does, and nothing at
+    // all when neither does (so groceries/services carry no empty time row).
+    final startTime = _nonEmpty(receipt.startTime);
+    final endTime = _nonEmpty(receipt.endTime);
+    final String? timeValue;
+    if (startTime != null && endTime != null) {
+      timeValue = '$startTime  →  $endTime';
+    } else if (startTime != null) {
+      timeValue = startTime;
+    } else if (endTime != null) {
+      timeValue = endTime;
+    } else {
+      timeValue = null;
+    }
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -70,12 +92,8 @@ class ReceiptCard extends StatelessWidget {
                       label: 'Invoice #',
                       value: receipt.invoiceNumber,
                     ),
-                    if (showTimes)
-                      _MetaRow(
-                        label: 'Time',
-                        value:
-                            '${receipt.startTime ?? '—'}  →  ${receipt.endTime ?? '—'}',
-                      ),
+                    if (timeValue != null)
+                      _MetaRow(label: 'Time', value: timeValue),
                     const SizedBox(height: 6),
                     Wrap(
                       spacing: 8,
