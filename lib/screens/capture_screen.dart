@@ -11,6 +11,7 @@ import '../services/image_cropper.dart';
 import '../services/image_optimizer.dart';
 import '../services/receipt_dedup.dart';
 import '../theme/app_theme.dart';
+import '../widgets/thinking_indicator.dart';
 import 'login_screen.dart';
 import 'results_screen.dart';
 
@@ -351,7 +352,7 @@ class _CaptureScreenState extends State<CaptureScreen> {
               if (_busy)
                 Column(
                   children: [
-                    const CircularProgressIndicator(),
+                    const ThinkingBrush(size: 48),
                     const SizedBox(height: 16),
                     Text(
                       _statusMessage ?? 'Working…',
