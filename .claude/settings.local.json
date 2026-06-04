@@ -36,7 +36,13 @@
       "Bash(timeout 20 node -e ' *)",
       "Bash(echo \"EXIT=$?\")",
       "Bash(git *)",
-      "Bash(node -e \"console.log\\(require\\('./package.json'\\).dependencies['@prisma/client']\\)\")"
+      "Bash(node -e \"console.log\\(require\\('./package.json'\\).dependencies['@prisma/client']\\)\")",
+      "PowerShell(npm run *)",
+      "Bash(node -e \"console.log\\(require\\('@google-cloud/vertexai/package.json'\\).version\\)\")",
+      "Bash(npm uninstall *)",
+      "Bash(node -e \"console.log\\(require\\('@google/genai/package.json'\\).version\\)\")",
+      "Bash(echo \"version: $\\(node -e \"console.log\\(require\\('@google/genai/package.json'\\).version\\)\"\\)\")",
+      "Bash(node -e \"const p=require\\('@google/genai/package.json'\\); console.log\\('types:',p.types||p.typings\\); console.log\\('main:',p.main\\)\")"
     ]
   }
 }
