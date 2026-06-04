@@ -50,3 +50,29 @@ the bottom.
 - Legacy AI Studio `GEMINI_API_KEY` deleted from Render. The backend now
   authenticates to Vertex AI via the GCP service account; no API key in the
   request path.
+
+## 2026-06-04
+
+### Frontend — custom "AI thinking" loader (`lib/widgets/thinking_indicator.dart`)
+
+- **Replaced the generic `CircularProgressIndicator`** on the capture screen
+  with a bespoke, animated `ThinkingBrush` loader during scan processing
+  (`lib/screens/capture_screen.dart`). _(`7870bd6`)_
+- **`ThinkingBrush` — the organic "brush star".** The shipped loader: a burst
+  of ~14 rays radiating from a center point, each given a deterministically
+  seeded jitter (`Random(7)`) in angle, length, and stroke width so the
+  silhouette reads as hand-sketched rather than mechanical. Geometry is built
+  once and held stable across rebuilds; only the animation moves. Rays
+  "breathe" — pulsing outward/inward and fading opacity on a soft sine, each
+  with a small per-ray phase offset so the whole mark shimmers as it thinks.
+  Defaults: `size 64`, `strokeWidth 3.5`, `rayCount 14`, `2400ms` loop,
+  cyber-blue `#0EA5E9`. Pure presentation — no app state or data flow.
+  _(`7870bd6`)_
+- **`ThinkingIndicator` — sweeping-arc variant.** Also added in the same file:
+  a `CustomPainter`-based rotating arc with a fading trail (cyber-blue
+  default, `1600ms` loop), kept as a lighter-weight alternative. _(`7870bd6`)_
+- **Throwaway preview harness** (`lib/preview_loader.dart`): a standalone
+  entrypoint (`flutter run -t lib/preview_loader.dart -d chrome`) that renders
+  `ThinkingBrush` at several sizes, a denser-ray variant, and on a dark
+  surface — for eyeballing the loader in isolation. Touches no app logic; safe
+  to delete. _(`7870bd6`)_
